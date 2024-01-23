@@ -1,0 +1,30 @@
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+telegram_bot:
+  - platform: polling
+    api_key: ${TELEGRAM_API_KEY}
+    allowed_chat_ids: ${TELEGRAM_ALLOWED_CHAT}
+notify:
+  - platform: telegram
+    name: ${TELEGRAM_NOTIFY_NAME}
+    chat_id: ${TELEGRAM_ALLOWED_CHAT}
+
+http:
+  use_x_forwarded_for: true
+  trusted_proxies: 
+    - !env_var TRUSTED_PROXY
+
+google_assistant:
+  project_id: home-assistent-21672
+  service_account: !include SERVICE_ACCOUNT.JSON
+  report_state: true

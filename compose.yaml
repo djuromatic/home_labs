@@ -1,0 +1,228 @@
+---
+version: '3.8'
+services:
+    proxy:
+        image: 'jc21/nginx-proxy-manager:latest'
+        restart: unless-stopped
+        user: root
+        labels:
+          logging: "promtail"
+          logging_jobname: "proxy_logs"
+        container_name: 'proxy-manager'
+        ports:
+            - '80:80' # Public HTTP Port
+            - '443:443' # Public HTTPS Port
+            - '81:81' # Admin Web Port
+        environment:
+            DB_SQLITE_FILE: '/data/database.sqlite'
+        volumes:
+            - proxy_data_storage:/data
+            - letsencrypt_storage:/etc/letsencrypt
+
+    qbittorrent-nox:
+          image: qbittorrentofficial/qbittorrent-nox:latest
+          container_name: qbittorrent-nox
+          restart: unless-stopped
+          labels:
+            logging: "promtail"
+            logging_jobname: "qbtorrent_logs"
+          read_only: true
+          tmpfs:
+            - /tmp
+          environment:
+            - QBT_WEBUI_PORT=8080
+          ports:
+            - "8010:8080"
+            - "6881:6881/tcp"
+            - "6881:6881/udp"
+          volumes:
+            - qb_storage:/downloads
+
+    homeassistant:
+          image: ghcr.io/home-assistant/home-assistant:latest
+          container_name: homeassistant
+          restart: unless-stopped
+          privileged: true
+          environment:
+            TELEGRAM_API_KEY: $TELEGRAM_API_KEY 
+            TELEGRAM_ALLOWED_CHAT: $TELEGRAM_ALLOWED_CHAT
+            TELEGRAM_NOTIFY_NAME: $TELEGRAM_NOTIFY_NAME
+            TRUSTED_PROXY: $TRUSTED_PROXY
+          labels:
+            logging: "promtail"
+            logging_jobname: "homeassistant_logs"
+          ports:
+            - "8123:8123"
+          volumes:
+            - /run/dbus:/run/dbus:ro
+            - ./homeassistant/configuration.yaml:/config/configuration.yaml
+            - homeassistant_config_storage:/config
+              #network_mode: host
+
+    portainer:
+          image: portainer/portainer-ce
+          container_name: portainer
+          restart: always
+          labels:
+            logging: "promtail"
+            logging_jobname: "portainer_logs"
+          ports:
+            - "9000:9000"
+          command: -H unix:///var/run/docker.sock
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - portainer_data_storage:/data
+
+    owncloud:
+          image: owncloud/server:${OWNCLOUD_VERSION}
+          container_name: owncloud_server
+          restart: always
+          labels:
+            logging: "promtail"
+            logging_jobname: "owncloud_logs"
+          ports:
+            - ${HTTP_PORT}:8080
+          depends_on:
+            - mariadb
+            - redis
+          environment:
+            - OWNCLOUD_DOMAIN=${OWNCLOUD_DOMAIN}
+            - OWNCLOUD_TRUSTED_DOMAINS=${OWNCLOUD_TRUSTED_DOMAINS}
+            - OWNCLOUD_DB_TYPE=mysql
+            - OWNCLOUD_DB_NAME=owncloud
+            - OWNCLOUD_DB_USERNAME=owncloud
+            - OWNCLOUD_DB_PASSWORD=owncloud
+            - OWNCLOUD_DB_HOST=mariadb
+            - OWNCLOUD_ADMIN_USERNAME=${ADMIN_USERNAME}
+            - OWNCLOUD_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+            - OWNCLOUD_MYSQL_UTF8MB4=true
+            - OWNCLOUD_REDIS_ENABLED=true
+            - OWNCLOUD_REDIS_HOST=redis
+          healthcheck:
+            test: ["CMD", "/usr/bin/healthcheck"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+          volumes:
+            - owncloud_data_storage:/mnt/data
+
+    mariadb:
+          image: mariadb:10.11 # minimum required ownCloud version is 10.9
+          container_name: owncloud_mariadb
+          restart: always
+          environment:
+            - MYSQL_ROOT_PASSWORD=owncloud
+            - MYSQL_USER=owncloud
+            - MYSQL_PASSWORD=owncloud
+            - MYSQL_DATABASE=owncloud
+            - MARIADB_AUTO_UPGRADE=1
+          command: ["--max-allowed-packet=128M", "--innodb-log-file-size=64M"]
+          healthcheck:
+            test: ["CMD", "mysqladmin", "ping", "-u", "root", "--password=owncloud"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+          volumes:
+            - database_storage:/var/lib/mysql
+
+    redis:
+          image: redis:6
+          container_name: owncloud_redis
+          restart: always
+          command: ["--databases", "1"]
+          healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+          volumes:
+            - redis_storage:/data
+
+    grafana:
+          image: grafana/grafana-enterprise
+          command: ["--config", "/etc/grafana/grafana.ini"]
+          container_name: grafana
+          restart: unless-stopped
+          environment:
+            GF_INSTALL_PLUGINS: "flant-statusmap-panel"
+            GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/mikrotik/mikrotik_mktxp_exporter.json
+            GF_SECURITY_ADMIN_USER: $ADMIN_USERNAME
+            GF_SECURITY_ADMIN_PASSWORD: $ADMIN_PASSWORD
+          healthcheck:
+            test: ["CMD-SHELL", "curl -f localhost:3000/api/health && echo 'ready'"]
+            interval: 10s
+            timeout: 10s
+            retries: 30
+          ports:
+            - '3000:3000'
+          volumes:
+            - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+            - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+            - ./grafana/dashboards:/var/lib/grafana/dashboards
+    loki:
+          image: grafana/loki:latest
+          ports:
+            - 3100:3100
+          command: -config.file=/etc/loki/local-config.yaml
+
+    promtail:
+      image:  grafana/promtail:latest
+      container_name: promtail
+      volumes:
+        - ./promtail/:/etc/promtail/
+        - /var/lib/docker/containers:/var/lib/docker/containers:ro
+        - /var/run/docker.sock:/var/run/docker.sock
+      command: -config.file=/etc/promtail/promtail.yaml
+      ports:
+        - 1514:1514
+      depends_on:
+        - loki
+
+    syslog-ng:
+      image: lscr.io/linuxserver/syslog-ng:latest
+      container_name: syslog-ng
+      volumes:
+        - ./syslog/:/config
+        - syslog_storage:/var/log:rw #optional
+      ports:
+        - 5514:5514/udp
+      restart: unless-stopped
+
+    mktxp:
+      container_name: mktxp
+      image: ghcr.io/akpw/mktxp:latest
+      environment:
+        MIKROTIK_HOST: $MIKROTIK_HOST
+        MIKROTIK_PORT: $MIKROTIK_PORT
+        MIKROTIK_USER: $MIKROTIK_USER
+        MIKROTIK_PASSWORD: $MIKROTIK_PASSWORD
+      ports:
+        - 49090:49090
+      volumes:
+        - './mktxp/:/home/mktxp/mktxp/'
+      restart: unless-stopped
+
+    prometheus:
+      command:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --web.enable-admin-api
+        - --web.enable-lifecycle
+      container_name: prometheus
+      image: prom/prometheus:latest
+      ports:
+      - published: 9090
+        target: 9090
+      restart: always
+      volumes:
+        - ./prometheus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+volumes:
+  homeassistant_config_storage: {}
+  qb_storage: {}
+  letsencrypt_storage: {}
+  proxy_data_storage: {}
+  portainer_data_storage: {}
+  owncloud_data_storage: {}
+  database_storage: {}
+  redis_storage: {}
+  syslog_storage: {}
