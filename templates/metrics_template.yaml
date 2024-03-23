@@ -1,0 +1,68 @@
+version: '3.8'
+services:
+  grafana:
+    image: grafana/grafana-enterprise
+    command:
+      - '--config'
+      - /etc/grafana/grafana.ini
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_INSTALL_PLUGINS: flant-statusmap-panel
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/mikrotik/mikrotik_mktxp_exporter.json
+      GF_SECURITY_ADMIN_USER: $ADMIN_USERNAME
+      GF_SECURITY_ADMIN_PASSWORD: $ADMIN_PASSWORD
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -f localhost:3000/api/health && echo ''ready'''
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    ports:
+      - '3000:3000'
+    volumes:
+      - >-
+        ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - >-
+        ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - './grafana/dashboards:/var/lib/grafana/dashboards'
+
+  loki:
+    image: 'grafana/loki:latest'
+    ports:
+      - '3100:3100'
+    command: '-config.file=/etc/loki/local-config.yaml'
+
+  promtail:
+    image: 'grafana/promtail:latest'
+    container_name: promtail
+    volumes:
+      - './promtail/:/etc/promtail/'
+      - '/var/lib/docker/containers:/var/lib/docker/containers:ro'
+      - '/var/run/docker.sock:/var/run/docker.sock'
+    command: '-config.file=/etc/promtail/promtail.yaml'
+    ports:
+      - '1514:1514'
+    depends_on:
+      - loki
+        
+  prometheus:
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-admin-api'
+      - '--web.enable-lifecycle'
+    container_name: prometheus
+    image: 'prom/prometheus:latest'
+    ports:
+      - published: 9090
+        target: 9090
+    restart: always
+    volumes:
+      - './prometheus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro'
+
+networks:
+  default:
+    name: 
+    external: true
